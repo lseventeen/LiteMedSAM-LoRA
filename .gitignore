@@ -1,0 +1,7 @@
+segs
+*.pth
+workdir
+overlay
+*egg-info
+__pycache__
+weights
