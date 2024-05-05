@@ -5,3 +5,6 @@ overlay
 *egg-info
 __pycache__
 weights
+test_demo
+wandb
+*pt
