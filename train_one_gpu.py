@@ -16,10 +16,10 @@ from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
 
 from segment_anything.modeling import MaskDecoder, PromptEncoder, TwoWayTransformer
-from tiny_vit_sam import TinyViT
+from models.ImageEncoder.tinyvit.tiny_vit import TinyViT
 import cv2
 import torch.nn.functional as F
-
+from build_model import build_model, MedSAM_Lite
 from matplotlib import pyplot as plt
 import argparse
 # %%
@@ -41,7 +41,7 @@ parser.add_argument(
     help="Path to the working directory where checkpoints and logs will be saved."
 )
 parser.add_argument('-out_size', type=int, default=256, help='output_size')
-parser.add_argument('-mod', type=str, default='sam_adpt', help='mod type:seg,cls,val_ad')
+parser.add_argument('-mod', type=str, default='None', help='mod type:seg,cls,val_ad')
 parser.add_argument('-mid_dim', type=int, default=None , help='middle dim of adapter or the rank of lora matrix')
 parser.add_argument('-thd', type=bool, default=False , help='3d or not')
 parser.add_argument('-chunk', type=int, default=None , help='crop volume depth')
@@ -298,54 +298,55 @@ if do_sancheck:
         break
 
 # %%
-class MedSAM_Lite(nn.Module):
-    def __init__(self, 
-                image_encoder, 
-                mask_decoder,
-                prompt_encoder
-                ):
-        super().__init__()
-        self.image_encoder = image_encoder
-        self.mask_decoder = mask_decoder
-        self.prompt_encoder = prompt_encoder
+# class MedSAM_Lite(nn.Module):
+#     def __init__(self, 
+#                 image_encoder, 
+#                 mask_decoder,
+#                 prompt_encoder
+#                 ):
+#         super().__init__()
+#         self.image_encoder = image_encoder
+#         self.mask_decoder = mask_decoder
+#         self.prompt_encoder = prompt_encoder
         
-    def forward(self, image, boxes):
-        image_embedding = self.image_encoder(image) # (B, 256, 64, 64)
+#     def forward(self, image, boxes):
+#         image_embedding = self.image_encoder(image) # (B, 256, 64, 64)
 
-        sparse_embeddings, dense_embeddings = self.prompt_encoder(
-            points=None,
-            boxes=boxes,
-            masks=None,
-        )
-        low_res_masks, iou_predictions = self.mask_decoder(
-            image_embeddings=image_embedding, # (B, 256, 64, 64)
-            image_pe=self.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
-            sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
-            dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
-            multimask_output=False,
-          ) # (B, 1, 256, 256)
+#         sparse_embeddings, dense_embeddings = self.prompt_encoder(
+#             points=None,
+#             boxes=boxes,
+#             masks=None,
+#         )
+#         low_res_masks, iou_predictions = self.mask_decoder(
+#             image_embeddings=image_embedding, # (B, 256, 64, 64)
+#             image_pe=self.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
+#             sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
+#             dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
+#             multimask_output=False,
+#           ) # (B, 1, 256, 256)
 
-        return low_res_masks, iou_predictions
+#         return low_res_masks, iou_predictions
 
-    @torch.no_grad()
-    def postprocess_masks(self, masks, new_size, original_size):
-        """
-        Do cropping and resizing
-        """
-        # Crop
-        masks = masks[:, :, :new_size[0], :new_size[1]]
-        # Resize
-        masks = F.interpolate(
-            masks,
-            size=(original_size[0], original_size[1]),
-            mode="bilinear",
-            align_corners=False,
-        )
+#     @torch.no_grad()
+#     def postprocess_masks(self, masks, new_size, original_size):
+#         """
+#         Do cropping and resizing
+#         """
+#         # Crop
+#         masks = masks[:, :, :new_size[0], :new_size[1]]
+#         # Resize
+#         masks = F.interpolate(
+#             masks,
+#             size=(original_size[0], original_size[1]),
+#             mode="bilinear",
+#             align_corners=False,
+#         )
 
-        return masks
+#         return masks
 
 # %%
 medsam_lite_image_encoder = TinyViT(
+    args = args,
     img_size=256,
     in_chans=3,
     embed_dims=[
@@ -391,7 +392,7 @@ medsam_lite_model = MedSAM_Lite(
     mask_decoder = medsam_lite_mask_decoder,
     prompt_encoder = medsam_lite_prompt_encoder
 )
-
+# medsam_lite_model  = build_model(args)
 if medsam_lite_checkpoint is not None:
     if isfile(medsam_lite_checkpoint):
         print(f"Finetuning with pretrained weights {medsam_lite_checkpoint}")

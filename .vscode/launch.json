@@ -1,0 +1,32 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": [
+              // "--input_dir","/ai/data/data/cvpr24-medsam/validation-box/imgs-011/imgs",
+              // "--output_dir","test_demo/test",
+              // "-lite_medsam_checkpoint_path","workdir/finetune/medsam_lite_latest.pth",
+            //   "workdir/adapter/medsam_lite_latest.pth",
+            "-pretrained_checkpoint", "pretrain_weight/boxes/lite_medsam.pth", 
+            "-train_mode", "boxes",
+            // "-work_dir", "workdir/box/test", 
+
+              
+            //   "-work_dir", "./workdir/adapter",
+
+              "-mod", "None"
+            //   "sam_adpt",
+
+
+            ]
+        }
+    ]
+}

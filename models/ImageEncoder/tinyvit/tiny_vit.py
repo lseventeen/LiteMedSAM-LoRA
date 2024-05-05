@@ -30,16 +30,22 @@ class PatchEmbed(nn.Module):
     def __init__(self, in_chans, embed_dim, resolution, activation):
         super().__init__()
         img_size: Tuple[int, int] = to_2tuple(resolution)
-        self.patches_resolution = (img_size[0] // 4, img_size[1] // 4)
+        #self.patches_resolution = (img_size[0] // 4, img_size[1] // 4)
+        self.patches_resolution = img_size
         self.num_patches = self.patches_resolution[0] * \
             self.patches_resolution[1]
         self.in_chans = in_chans
         self.embed_dim = embed_dim
         n = embed_dim
+        #self.seq = nn.Sequential(
+        #    Conv2d_BN(in_chans, n // 2, 3, 2, 1),
+        #    activation(),
+        #    Conv2d_BN(n // 2, n, 3, 2, 1),
+        #)
         self.seq = nn.Sequential(
-            Conv2d_BN(in_chans, n // 2, 3, 2, 1),
+            Conv2d_BN(in_chans, n // 2, 1, 1, 0),
             activation(),
-            Conv2d_BN(n // 2, n, 3, 2, 1),
+            Conv2d_BN(n // 2, n, 1, 1, 0),
         )
 
     def forward(self, x):
@@ -234,7 +240,10 @@ class BasicLayer(nn.Module):
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
         
 class TinyViT(nn.Module):
-    def __init__(self, args, img_size=224, in_chans=3, num_classes=1000,
+    def __init__(self, 
+                 args, img_size=224, 
+                 in_chans=3, 
+                #  num_classes=1000,
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2],
                  num_heads=[3, 6, 12, 24],
                  window_sizes=[7, 7, 14, 7],
@@ -249,7 +258,7 @@ class TinyViT(nn.Module):
         super().__init__()
         self.img_size=img_size
         #import pdb;pdb.set_trace()
-        self.num_classes = num_classes
+        # self.num_classes = num_classes
         self.depths = depths
         self.num_layers = len(depths)
         self.mlp_ratio = mlp_ratio
@@ -302,9 +311,9 @@ class TinyViT(nn.Module):
             self.layers.append(layer)
 
         # Classifier head
-        self.norm_head = nn.LayerNorm(embed_dims[-1])
-        self.head = nn.Linear(
-            embed_dims[-1], num_classes) if num_classes > 0 else torch.nn.Identity()
+        # self.norm_head = nn.LayerNorm(embed_dims[-1])
+        # self.head = nn.Linear(
+        #     embed_dims[-1], num_classes) if num_classes > 0 else torch.nn.Identity()
 
         # init weights
         self.apply(self._init_weights)
@@ -348,8 +357,8 @@ class TinyViT(nn.Module):
                 layer.downsample.apply(
                     lambda x: _set_lr_scale(x, lr_scales[i - 1]))
         assert i == depth
-        for m in [self.norm_head, self.head]:
-            m.apply(lambda x: _set_lr_scale(x, lr_scales[-1]))
+        # for m in [self.norm_head, self.head]:
+        #     m.apply(lambda x: _set_lr_scale(x, lr_scales[-1]))
 
         for k, p in self.named_parameters():
             p.param_name = k
@@ -384,7 +393,7 @@ class TinyViT(nn.Module):
             layer = self.layers[i]
             x = layer(x)
         B,_,C=x.size()
-        x = x.view(B, self.img_size//16, self.img_size//16, C)
+        x = x.view(B, 64, 64, C)
         x=x.permute(0, 3, 1, 2)
         x=self.neck(x)
         return x
