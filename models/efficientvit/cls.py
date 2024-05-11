@@ -5,9 +5,9 @@
 import torch
 import torch.nn as nn
 
-from efficientvit.models.efficientvit.backbone import EfficientViTBackbone, EfficientViTLargeBackbone
-from efficientvit.models.nn import ConvLayer, LinearLayer, OpSequential
-from efficientvit.models.utils import build_kwargs_from_config
+from models.efficientvit.backbone import EfficientViTBackbone, EfficientViTLargeBackbone
+from models.efficientvit.nn import ConvLayer, LinearLayer, OpSequential
+from models.efficientvit.utils import build_kwargs_from_config
 
 __all__ = [
     "EfficientViTCls",

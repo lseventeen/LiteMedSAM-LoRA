@@ -13,7 +13,7 @@ from dataset.utils import resize_longest_side,pad_image
 
 
 class NpyBoxDataset(Dataset): 
-    def __init__(self, data_root, num_each_epoch = 100000,image_size=256, bbox_shift=5,  data_aug=True):
+    def __init__(self, data_root, num_each_epoch = 100000,image_size=256, bbox_shift=5, num_masks = 16, data_aug=True):
         self.data_root = data_root
         self.data_list = []
         data_mode = os.listdir(data_root)
@@ -27,11 +27,12 @@ class NpyBoxDataset(Dataset):
         #     file for file in self.gt_path_files
         #     if isfile(join(self.img_path, basename(file)))
         # ]
-        # self.image_size = image_size
+        self.image_size = image_size
         self.target_length = image_size
         self.bbox_shift = bbox_shift
         self.data_aug = data_aug
         self.num_each_epoch = num_each_epoch
+        self.num_masks = num_masks 
     
     def __len__(self):
         return self.num_each_epoch
@@ -52,7 +53,7 @@ class NpyBoxDataset(Dataset):
         img_resize = resize_longest_side(img_3c,self.target_length)
         # Resizing
         img_resize = (img_resize - img_resize.min()) / np.clip(img_resize.max() - img_resize.min(), a_min=1e-8, a_max=None) # normalize to [0, 1], (H, W, 3
-        img_padded = pad_image(img_resize) # (256, 256, 3)
+        img_padded = pad_image(img_resize,target_size=self.image_size) # (256, 256, 3)
         # convert the shape to (3, H, W)
         img_padded = np.transpose(img_padded, (2, 0, 1)) # (3, 256, 256)
         assert np.max(img_padded)<=1.0 and np.min(img_padded)>=0.0, 'image should be normalized to [0, 1]'
@@ -62,38 +63,51 @@ class NpyBoxDataset(Dataset):
             (img_resize.shape[1], img_resize.shape[0]),
             interpolation=cv2.INTER_NEAREST
         ).astype(np.uint8)
-        gt = pad_image(gt) # (256, 256)
+        gt = pad_image(gt,target_size=self.image_size) # (256, 256)
         label_ids = np.unique(gt)[1:]
-        try:
-            gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
-        except:
-            print(img_name, 'label_ids.tolist()', label_ids.tolist())
-            gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
-        # add data augmentation: random fliplr and random flipud
         if self.data_aug:
             if random.random() > 0.5:
                 img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-1))
-                gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-1))
+                gt = np.ascontiguousarray(np.flip(gt, axis=-1))
                 # print('DA with flip left right')
             if random.random() > 0.5:
                 img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-2))
-                gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-2))
+                gt = np.ascontiguousarray(np.flip(gt, axis=-2))
                 # print('DA with flip upside down')
-        gt2D = np.uint8(gt2D > 0)
-        y_indices, x_indices = np.where(gt2D > 0)
-        x_min, x_max = np.min(x_indices), np.max(x_indices)
-        y_min, y_max = np.min(y_indices), np.max(y_indices)
-        # add perturbation to bounding box coordinates
-        H, W = gt2D.shape
-        x_min = max(0, x_min - random.randint(0, self.bbox_shift))
-        x_max = min(W, x_max + random.randint(0, self.bbox_shift))
-        y_min = max(0, y_min - random.randint(0, self.bbox_shift))
-        y_max = min(H, y_max + random.randint(0, self.bbox_shift))
-        bboxes = np.array([x_min, y_min, x_max, y_max])
+        gts = []
+        boxes = []
+        for i in range(self.num_masks):
+            try:
+                gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
+            except:
+                print(img_name, 'label_ids.tolist()', label_ids.tolist())
+                gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
+            # add data augmentation: random fliplr and random flipud
+            
+            gt2D = np.uint8(gt2D > 0)
+            y_indices, x_indices = np.where(gt2D > 0)
+            x_min, x_max = np.min(x_indices), np.max(x_indices)
+            y_min, y_max = np.min(y_indices), np.max(y_indices)
+            # add perturbation to bounding box coordinates
+            H, W = gt2D.shape
+            x_min = max(0, x_min - random.randint(0, self.bbox_shift))
+            x_max = min(W, x_max + random.randint(0, self.bbox_shift))
+            y_min = max(0, y_min - random.randint(0, self.bbox_shift))
+            y_max = min(H, y_max + random.randint(0, self.bbox_shift))
+            box = np.array([x_min, y_min, x_max, y_max])
+            gts.append(gt2D)
+            boxes.append(box)
+        gts = np.stack(gts,axis=0)
+        boxes = np.stack(boxes,axis=0)
+        # masks = 
+        
+
+
+
         return {
             "image": torch.tensor(img_padded).float(),
-            "gt2D": torch.tensor(gt2D[None, :,:]).long(),
-            "bboxes": torch.tensor(bboxes[None, None, ...]).float(), # (B, 1, 4)
+            "gt2D": torch.tensor(gts).float(),
+            "bboxes": torch.tensor(boxes).float(), # (B, 1, 4)
             "image_name": img_name,
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
             "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long()
@@ -102,8 +116,8 @@ class NpyBoxDataset(Dataset):
     
 
 class NpyScribbleDataset(NpyBoxDataset): 
-    def __init__(self, data_root, num_each_epoch = 100000, image_size=256, data_aug=True):
-        super().__init__(data_root, num_each_epoch,image_size, data_aug)
+    def __init__(self, data_root, num_each_epoch = 100000, image_size=256, bbox_shift=5, num_masks = 64, data_aug=True):
+        super().__init__(data_root, num_each_epoch,image_size, bbox_shift, num_masks, data_aug)
       
         self.shape_sampler = build_shape_sampler(cfg)
     
@@ -117,7 +131,7 @@ class NpyScribbleDataset(NpyBoxDataset):
         img_resize = resize_longest_side(img_3c,self.target_length)
         # Resizing
         img_resize = (img_resize - img_resize.min()) / np.clip(img_resize.max() - img_resize.min(), a_min=1e-8, a_max=None) # normalize to [0, 1], (H, W, 3
-        img_padded = pad_image(img_resize) # (256, 256, 3)
+        img_padded = pad_image(img_resize,target_size=self.image_size) # (256, 256, 3)
         # convert the shape to (3, H, W)
         img_padded = np.transpose(img_padded, (2, 0, 1)) # (3, 256, 256)
         assert np.max(img_padded)<=1.0 and np.min(img_padded)>=0.0, 'image should be normalized to [0, 1]'
@@ -127,29 +141,39 @@ class NpyScribbleDataset(NpyBoxDataset):
             (img_resize.shape[1], img_resize.shape[0]),
             interpolation=cv2.INTER_NEAREST
         ).astype(np.uint8)
-        gt = pad_image(gt) # (256, 256)
+        gt = pad_image(gt,target_size=self.image_size) # (256, 256)
         label_ids = np.unique(gt)[1:]
-        try:
-            gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
-        except:
-            print(img_name, 'label_ids.tolist()', label_ids.tolist())
-            gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
-        # add data augmentation: random fliplr and random flipud
-        if self.data_aug:
-            if random.random() > 0.5:
-                img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-1))
-                gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-1))
-                # print('DA with flip left right')
-            if random.random() > 0.5:
-                img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-2))
-                gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-2))
-                # print('DA with flip upside down')
-        gt2D = np.uint8(gt2D > 0)
-        scribbles = (self.shape_sampler(gt2D) * 1).squeeze()
+
+        gts = []
+        mask_inputs = []
+        for i in range(self.num_masks):
+
+            try:
+                gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
+            except:
+                print(img_name, 'label_ids.tolist()', label_ids.tolist())
+                gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
+            # add data augmentation: random fliplr and random flipud
+            if self.data_aug:
+                if random.random() > 0.5:
+                    img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-1))
+                    gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-1))
+                    # print('DA with flip left right')
+                if random.random() > 0.5:
+                    img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-2))
+                    gt2D = np.ascontiguousarray(np.flip(gt2D, axis=-2))
+                    # print('DA with flip upside down')
+            gt2D = np.uint8(gt2D > 0)
+            scribbles = (self.shape_sampler(gt2D) * 1)
+
+            gts.append(gt2D)
+            mask_inputs.append(scribbles)
+        gts = np.stack(gts,axis=0)
+        mask_inputs = np.stack(mask_inputs,axis=0)
         return {
             "image": torch.tensor(img_padded).float(),
-            "gt2D": torch.tensor(gt2D[None, :,:]).long(),
-            "scribbles": scribbles[None, ...].clone().detach().float(), 
+            "gt2D": torch.tensor(gts).float(),
+            "mask_inputs": torch.tensor(mask_inputs).float(),
             "image_name": img_name,
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
             "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long()

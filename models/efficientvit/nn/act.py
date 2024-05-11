@@ -6,7 +6,7 @@ from functools import partial
 
 import torch.nn as nn
 
-from efficientvit.models.utils import build_kwargs_from_config
+from models.efficientvit.utils import build_kwargs_from_config
 
 __all__ = ["build_act"]
 

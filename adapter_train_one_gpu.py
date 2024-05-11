@@ -19,6 +19,7 @@ import wandb
 from build_model import build_model
 from matplotlib import pyplot as plt
 import argparse
+from utils.loss import loss_masks
 # %%
 
 def Config():
@@ -39,6 +40,10 @@ def Config():
         "-resume", type=str, default='None',
         help="Path to the checkpoint to continue training."
     )
+    parser.add_argument(
+        "-num_masks", type=int, default=16,
+        help="set the number of mask for each image"
+    )
     parser.add_argument("-tag", help='tag of experiment',default=None)
     # parser.add_argument(
     #     "-work_dir", type=str, default="./workdir",
@@ -52,15 +57,20 @@ def Config():
     parser.add_argument('-chunk', type=int, default=None , help='crop volume depth')
 
     parser.add_argument(
-        "-num_epochs", type=int, default=10,
+        "-num_epochs", type=int, default=20,
         help="Number of epochs to train."
     )
+    parser.add_argument(
+        "-num_each_epoch", type=int, default=100000,
+        help="Number of data in each epochs to train."
+    )
+    
     parser.add_argument(
         "-batch_size", type=int, default=4,
         help="Batch size."
     )
     parser.add_argument(
-        "-num_workers", type=int, default=8,
+        "-num_workers", type=int, default=16,
         help="Number of workers for dataloader."
     )
     parser.add_argument(
@@ -68,7 +78,7 @@ def Config():
         help="Device to train on."
     )
     parser.add_argument(
-        "-bbox_shift", type=int, default=5,
+        "-bbox_shift", type=int, default=10,
         help="Perturbation to bounding box coordinates during training."
     )
     parser.add_argument(
@@ -126,7 +136,9 @@ class SAMIL:
         self.data_root = args.data_root
         self.pretrained_checkpoint = args.pretrained_checkpoint
         self.num_epochs = args.num_epochs
+        self.num_each_epoch = args.num_each_epoch
         self.batch_size = args.batch_size
+        
         self.num_workers = args.num_workers
         self.device = args.device
         self.bbox_shift = args.bbox_shift
@@ -137,6 +149,9 @@ class SAMIL:
         self.ce_loss_weight = args.ce_loss_weight
         self.checkpoint = args.resume
         self.train_mode = args.train_mode 
+        self.num_masks = args.num_masks 
+        self.amp = "fp32"
+        self.grad_clip = 2
         self.dataset = NpyBoxDataset if self.train_mode == "boxes" else NpyScribbleDataset
         self.model = build_model(self.args)
         self.set_model()
@@ -192,37 +207,37 @@ class SAMIL:
         print(f"MedSAM Lite size: {sum(p.numel() for p in self.model.parameters())}")
 
     def train(self):
-
-        optimizer = optim.AdamW(
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.enable_amp)
+        self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
             betas=(0.9, 0.999),
             eps=1e-08,
             weight_decay=self.weight_decay,
         )
-        lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
+        self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
             mode='min',
             factor=0.9,
             patience=5,
             cooldown=0
         )
-        seg_loss = monai.losses.DiceLoss(sigmoid=True, squared_pred=True, reduction='mean')
-        ce_loss = nn.BCEWithLogitsLoss(reduction='mean')
-        iou_loss = nn.MSELoss(reduction='mean')
+        self.seg_loss = monai.losses.DiceLoss(sigmoid=True, squared_pred=True, reduction='mean')
+        self.ce_loss = nn.BCEWithLogitsLoss(reduction='mean')
+        self.iou_loss = nn.MSELoss(reduction='mean')
         # %%
         # if self.train_mode == "Box":
         #     train_dataset = NpyBoxDataset(data_root=self.data_root, data_aug=True)
         # else:
         #     train_dataset = NpyBoxDataset(data_root=self.data_root, data_aug=True)
-        train_dataset = self.dataset(data_root=self.data_root, num_each_epoch=100000 ,data_aug=True)
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
+        train_dataset = self.dataset(data_root=self.data_root, num_each_epoch=self.num_each_epoch ,num_masks = self.num_masks,data_aug=True)
+        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
 
         if self.checkpoint and isfile(self.checkpoint):
             print(f"Resuming from checkpoint {self.checkpoint}")
             checkpoint = torch.load(self.checkpoint)
             self.model.load_state_dict(checkpoint["model"], strict=True)
-            optimizer.load_state_dict(checkpoint["optimizer"])
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
             start_epoch = checkpoint["epoch"]
             best_loss = checkpoint["loss"]
             print(f"Loaded checkpoint from epoch {start_epoch}")
@@ -231,86 +246,144 @@ class SAMIL:
             best_loss = 1e10
         if self.args.mod == 'sam_adalora':
             ind = 0
-        # %%
-        train_losses = []
-        boxes = None
-        masks = None
+        self.train_losses = []
         self.model.train()
         for epoch in range(start_epoch + 1, self.num_epochs):
-            epoch_loss = [1e10 for _ in range(len(train_loader))]
-            epoch_start_time = time()
-            pbar = tqdm(train_loader)
-            for step, batch in enumerate(pbar):
-                if self.args.mod == 'sam_adalora':
-                    ind += 1
-                image = batch["image"]
-                gt2D = batch["gt2D"]
-                optimizer.zero_grad()
-                if self.train_mode == "boxes":
-                    boxes = batch["bboxes"]
-                    boxes = boxes.to(self.device)
-                else:
-                    masks = batch['scribbles']
-                    masks = masks.to(self.device)
-                    
-                
-                image, gt2D = image.to(self.device), gt2D.to(self.device)
-                logits_pred, iou_pred = self.model(image, boxes,masks)
-                l_seg = seg_loss(logits_pred, gt2D)
-                l_ce = ce_loss(logits_pred, gt2D.float())
-                #mask_loss = l_seg + l_ce
-                mask_loss = self.seg_loss_weight * l_seg + self.ce_loss_weight * l_ce
-                iou_gt = cal_iou(torch.sigmoid(logits_pred) > 0.5, gt2D.bool())
-                l_iou = iou_loss(iou_pred, iou_gt)
-                #loss = mask_loss + l_iou
-                loss = mask_loss + self.iou_loss_weight * l_iou
-                epoch_loss[step] = loss.item()
-                # loss.backward()
-
-                if self.args.mod == 'sam_adalora':
-                    from models.common import loralib as lora
-                    (loss+lora.compute_orth_regu(self.model, regu_weight=0.1)).backward()
-                    optimizer.step()
-                    self.rankallocator.update_and_mask(self.model, ind)
-                else:
-                    loss.backward()
-                    optimizer.step()
-
-
-
-                # optimizer.step()
-                optimizer.zero_grad()
-                pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
-
-            epoch_end_time = time()
-            epoch_loss_reduced = sum(epoch_loss) / len(epoch_loss)
-            train_losses.append(epoch_loss_reduced)
-            lr_scheduler.step(epoch_loss_reduced)
+            self.optimizer.zero_grad()
+            self._train_one_epoch(epoch)
             model_weights = self.model.state_dict()
-            wandb.log({'loss': epoch_loss_reduced})
+            # self.after_step()
+            wandb.log({'loss': self.epoch_loss_reduced})
             checkpoint = {
                 "model": model_weights,
                 "epoch": epoch,
-                "optimizer": optimizer.state_dict(),
-                "loss": epoch_loss_reduced,
+                "optimizer": self.optimizer.state_dict(),
+                "loss": self.epoch_loss_reduced,
                 "best_loss": best_loss,
             }
             torch.save(checkpoint, join(self.work_dir, "medsam_lite_latest.pth"))
-            if epoch_loss_reduced < best_loss:
-                print(f"New best loss: {best_loss:.4f} -> {epoch_loss_reduced:.4f}")
-                best_loss = epoch_loss_reduced
+            if self.epoch_loss_reduced < best_loss:
+                print(f"New best loss: {best_loss:.4f} -> {self.epoch_loss_reduced:.4f}")
+                best_loss = self.epoch_loss_reduced
                 checkpoint["best_loss"] = best_loss
                 torch.save(checkpoint, join(self.work_dir, "medsam_lite_best.pth"))
 
-            epoch_loss_reduced = 1e10
             # %% plot loss
-            plt.plot(train_losses)
+            plt.plot(self.train_losses)
             plt.title("Dice + Binary Cross Entropy + IoU Loss")
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
             plt.savefig(join(self.work_dir, "train_loss.png"))
             plt.close()
 
+
+       
+    def _train_one_epoch(self,epoch):
+        # %%
+        
+        epoch_loss = [1e10 for _ in range(len(self.train_loader))]
+        self.epoch_start_time = time()
+        pbar = tqdm(self.train_loader)
+
+        for step, batch in enumerate(pbar):
+            if self.args.mod == 'sam_adalora':
+                ind += 1
+            image = batch["image"]
+            gt = batch["gt2D"]
+            image, gt = image.to(self.device), gt.to(self.device)
+            self.optimizer.zero_grad()
+            if self.train_mode == "boxes":
+                boxes = batch["bboxes"]
+                boxes = boxes.to(self.device)
+            else:
+                masks_input = batch['mask_inputs']
+                masks_input = masks_input.to(self.device)
+
+            batched_input = []
+            for b_i in range(len(image)):
+                dict_input = dict()
+                dict_input["image"] = image[b_i]
+                if self.train_mode == "boxes":
+                    dict_input["boxes"] = boxes[b_i]
+                else:
+                    dict_input["mask_inputs"] = masks_input[b_i] 
+    
+                batched_input.append(dict_input)
+                
+            
+            with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.enable_amp):
+                if random.random() >= 0.5:
+                    output, iou_predictions = self.model(batched_input, multimask_output=True)
+                else:
+                    output, iou_predictions = self.model(batched_input, multimask_output=False)
+
+                gt = gt.reshape(-1, image.shape[2], image.shape[3]).unsqueeze(1)
+                loss_list = []
+                for i in range(output.shape[2]):
+                    # output_i = (
+                    #     F.interpolate(output[:, :, i], size=(image.shape[2], image.shape[3]), mode="bilinear")
+                    #     .reshape(-1, image.shape[2], image.shape[3])
+                    #     .unsqueeze(1)
+                    # )
+                    output_i = output[:, :, i].reshape(-1, image.shape[2], image.shape[3]).unsqueeze(1)
+                    
+                    loss_mask_i, loss_dice_i = loss_masks(output_i, gt, len(output_i), mode="none")
+                    loss_i = loss_mask_i * 20 + loss_dice_i
+                    loss_list.append(loss_i)
+                loss = torch.stack(loss_list, -1)
+
+                min_indices = torch.argmin(loss, dim=1)
+                mask = torch.zeros_like(loss, device=loss.device)
+                mask.scatter_(1, min_indices.unsqueeze(1), 1)
+
+                loss = (loss * mask).mean() * loss.shape[-1]
+                # logits_pred, iou_pred = self.model(batched_input,False)
+                
+                # l_seg = self.seg_loss(logits_pred, gt2D)
+                # l_ce = self.ce_loss(logits_pred, gt2D.float())
+                # #mask_loss = l_seg + l_ce
+                # loss = self.seg_loss_weight * l_seg + self.ce_loss_weight * l_ce
+                # iou_gt = cal_iou(torch.sigmoid(logits_pred) > 0.5, gt2D.bool())
+                # l_iou = self.iou_loss(iou_pred, iou_gt)
+                #loss = mask_loss + l_iou
+                # loss = mask_loss + self.iou_loss_weight * l_iou
+                epoch_loss[step] = loss.item()
+                # loss.backward()
+
+                if self.args.mod == 'sam_adalora':
+                    from models.common import loralib as lora
+                    (loss+lora.compute_orth_regu(self.model, regu_weight=0.1)).backward()
+                    self.optimizer.step()
+                    self.rankallocator.update_and_mask(self.model, ind)
+                else:
+                    # loss.backward()
+                    self.scaler.scale(loss).backward()
+                    # self.optimizer.step()
+
+
+            self.scaler.unscale_(self.optimizer)
+        # gradient clip
+            if self.grad_clip is not None:
+                torch.nn.utils.clip_grad_value_(self.model.parameters(), self.grad_clip)
+            # update
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            pbar.set_description(f"Epoch {epoch} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, loss: {loss.item():.4f}")
+        self.epoch_loss_reduced = sum(epoch_loss) / len(epoch_loss)
+        self.train_losses.append(self.epoch_loss_reduced)
+        self.lr_scheduler.step(self.epoch_loss_reduced)
+    @property
+    def enable_amp(self) -> bool:
+        return self.amp != "fp32"
+    @property
+    def amp_dtype(self) -> torch.dtype:
+        if self.amp == "fp16":
+            return torch.float16
+        elif self.amp == "bf16":
+            return torch.bfloat16
+        else:
+            return torch.float32
+        
 
 if __name__ == "__main__":
     args,tag = Config()

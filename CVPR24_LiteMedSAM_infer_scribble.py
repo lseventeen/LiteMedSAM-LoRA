@@ -152,17 +152,27 @@ def MedSAM_infer_npz(gt_path_file):
 
     label_ids = np.unique(scribble[(scribble != 0) & (scribble != 1000)])
     scribbles_list = []
+    scribbles_label = []
     for label_id in label_ids:
         
         scribble_input = np.uint8(scribble == label_id)
         scribble_input = pad_image(resize_longest_side(scribble_input[...,np.newaxis],256)[:, :, None], 256)
         scribble_input = torch.from_numpy(scribble_input).permute(2,0,1)[None,]
         scribble_input = (scribble_input > 0) * 1
+        scribbles_list.append(scribble_input)
+        scribbles_label.append(label_id)
+        if len(boxes_2D) > 1:
+            boxes_2D = np.stack(boxes_2D)
+        elif len(boxes_2D) == 1:
+            boxes_2D = boxes_2D[0]
+        else:
+            continue
 
 
-        medsam_mask, iou_pred = medsam_inference(medsam_lite_model, image_embedding, scribble_input, (newh, neww), (H, W))
-        segs[medsam_mask>0] = label_id
-        scribbles_list.append(scribble)
+
+    medsam_mask, iou_pred = medsam_inference(medsam_lite_model, image_embedding, scribble_input, (newh, neww), (H, W))
+    segs[medsam_mask>0] = label_id
+        
 
     np.savez_compressed(
         join(pred_save_dir, npz_name),
@@ -184,7 +194,7 @@ def MedSAM_infer_npz(gt_path_file):
 
         for i, label_id in enumerate(label_ids):
             color = np.random.rand(3)
-            show_mask((scribbles_list[i]==label_id).astype(np.uint8), ax[1], mask_color=color)
+            show_mask((scribble==label_id).astype(np.uint8), ax[1], mask_color=color)
             show_mask((segs == label_id).astype(np.uint8), ax[2], mask_color=color)
 
         plt.tight_layout()
@@ -200,3 +210,5 @@ if __name__ == '__main__':
             for i, _ in tqdm(enumerate(pool.imap_unordered(MedSAM_infer_npz, gt_path_files))):
                 pbar.update()
 
+
+# %%

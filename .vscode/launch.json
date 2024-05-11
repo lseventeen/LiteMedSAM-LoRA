@@ -15,15 +15,20 @@
               // "--output_dir","test_demo/test",
               // "-lite_medsam_checkpoint_path","workdir/finetune/medsam_lite_latest.pth",
             //   "workdir/adapter/medsam_lite_latest.pth",
-            "-pretrained_checkpoint", "pretrain_weight/boxes/lite_medsam.pth", 
-            "-train_mode", "boxes",
+            // "-pretrained_checkpoint", "pretrain_weight/boxes/lite_medsam.pth", 
+            "-train_mode", "scribble",
             // "-work_dir", "workdir/box/test", 
-
+                // "-o","test_demo/mutil_masks_test/",
+                // "-lite_medsam_checkpoint_path","workdir/boxes/adapter/medsam_lite_latest.pth",
+                // "-png_save_dir","./overlay/mutil_masks_test3/",
               
             //   "-work_dir", "./workdir/adapter",
-
-              "-mod", "None"
+            // "-i", "/ai/data/data/cvpr24-medsam/validation-box/3D_test",
+            // "-mod", 
             //   "sam_adpt",
+            //   "--save_overlay"
+            "-pretrained_checkpoint", "models/efficientvit/checkpoint/l0.pt",
+            "-batch_size","1"
 
 
             ]

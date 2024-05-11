@@ -18,8 +18,8 @@ from segment_anything.utils.amg import build_all_layer_point_grids
 from segment_anything.utils.transforms import ResizeLongestSide
 from torchvision.transforms.functional import resize, to_pil_image
 
-from efficientvit.backbone import EfficientViTBackbone, EfficientViTLargeBackbone
-from nn import (
+from models.efficientvit.backbone import EfficientViTBackbone, EfficientViTLargeBackbone
+from models.efficientvit.nn import (
     ConvLayer,
     DAGBlock,
     FusedMBConv,
@@ -31,7 +31,7 @@ from nn import (
     UpSampleLayer,
     build_norm,
 )
-from utils import build_kwargs_from_config, get_device
+from models.efficientvit.utils import build_kwargs_from_config, get_device
 
 __all__ = [
     "SamPad",
@@ -561,7 +561,7 @@ def build_efficientvit_sam(image_encoder: EfficientViTSamImageEncoder, image_siz
 
 
 def efficientvit_sam_l0(image_size: int = 512, **kwargs) -> EfficientViTSam:
-    from efficientvit.backbone import efficientvit_backbone_l0
+    from models.efficientvit.backbone import efficientvit_backbone_l0
 
     backbone = efficientvit_backbone_l0(**kwargs)
 
@@ -579,7 +579,7 @@ def efficientvit_sam_l0(image_size: int = 512, **kwargs) -> EfficientViTSam:
 
 
 def efficientvit_sam_l1(image_size: int = 512, **kwargs) -> EfficientViTSam:
-    from efficientvit.backbone import efficientvit_backbone_l1
+    from models.efficientvit.backbone import efficientvit_backbone_l1
 
     backbone = efficientvit_backbone_l1(**kwargs)
 
@@ -597,7 +597,7 @@ def efficientvit_sam_l1(image_size: int = 512, **kwargs) -> EfficientViTSam:
 
 
 def efficientvit_sam_l2(image_size: int = 512, **kwargs) -> EfficientViTSam:
-    from efficientvit.backbone import efficientvit_backbone_l2
+    from models.efficientvit.backbone import efficientvit_backbone_l2
 
     backbone = efficientvit_backbone_l2(**kwargs)
 
@@ -615,7 +615,7 @@ def efficientvit_sam_l2(image_size: int = 512, **kwargs) -> EfficientViTSam:
 
 
 def efficientvit_sam_xl0(image_size: int = 1024, **kwargs) -> EfficientViTSam:
-    from efficientvit.backbone import EfficientViTLargeBackbone
+    from models.efficientvit.backbone import EfficientViTLargeBackbone
 
     backbone = EfficientViTLargeBackbone(
         width_list=[32, 64, 128, 256, 512, 1024],
@@ -640,7 +640,7 @@ def efficientvit_sam_xl0(image_size: int = 1024, **kwargs) -> EfficientViTSam:
 
 
 def efficientvit_sam_xl1(image_size: int = 1024, **kwargs) -> EfficientViTSam:
-    from efficientvit.backbone import EfficientViTLargeBackbone
+    from models.efficientvit.backbone import EfficientViTLargeBackbone
 
     backbone = EfficientViTLargeBackbone(
         width_list=[32, 64, 128, 256, 512, 1024],

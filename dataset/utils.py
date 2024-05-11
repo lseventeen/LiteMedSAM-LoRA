@@ -112,7 +112,7 @@ def get_bbox256(mask_256, bbox_shift=3):
 
     return bboxes256
 
-def resize_box_to_256(box, original_size):
+def resize_box_to_256(box, original_size,new_size = 256):
     """
     the input bounding box is obtained from the original image
     here, we rescale it to the coordinates of the resized image
@@ -129,8 +129,8 @@ def resize_box_to_256(box, original_size):
     numpy.ndarray
         bounding box coordinates in the resized image
     """
-    new_box = np.zeros_like(box)
-    ratio = 256 / max(original_size)
+    # new_box = np.zeros_like(box)
+    ratio = new_size / max(original_size)
     # for i in range(len(box)):
     #     new_box[i] = int(box[i] * ratio)
     new_box = np.array(box * ratio).astype(int)

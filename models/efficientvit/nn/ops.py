@@ -7,9 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import autocast
 
-from efficientvit.models.nn.act import build_act
-from efficientvit.models.nn.norm import build_norm
-from efficientvit.models.utils import get_same_padding, list_sum, resize, val2list, val2tuple
+from models.efficientvit.nn.act import build_act
+from models.efficientvit.nn.norm import build_norm
+from models.efficientvit.utils import get_same_padding, list_sum, resize, val2list, val2tuple
 
 __all__ = [
     "ConvLayer",
