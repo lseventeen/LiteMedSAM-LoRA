@@ -198,13 +198,14 @@ def MedSAM_infer_npz_2D(img_npz_file):
         plt.close()
 
 
-def MedSAM_infer_npz_3D(img_npz_file):
+def MedSAM_infer_npz_3D(img_npz_file,new_size,scale = 0.75):
     npz_name = basename(img_npz_file)
     npz_data = np.load(img_npz_file, 'r', allow_pickle=True)
     img_3D = npz_data['imgs'] # (D, H, W)
     spacing = npz_data['spacing'] # not used in this demo because it treats each slice independently
     segs = np.zeros_like(img_3D, dtype=np.uint8) 
     boxes_3D = npz_data['boxes'] # [[x_min, y_min, z_min, x_max, y_max, z_max]]
+    boxes_3D = resize_boxes(boxes_3D, scale,scale)
 
     for idx, box3D in enumerate(boxes_3D, start=1):
         segs_3d_temp = np.zeros_like(img_3D, dtype=np.uint8) 
@@ -215,7 +216,7 @@ def MedSAM_infer_npz_3D(img_npz_file):
 
         # infer from middle slice to the z_max
         # print(npz_name, 'infer from middle slice to the z_max')
-        for z in range(z_middle, z_max):
+        for z in range(z_middle, z_max+1):
             img_2d = img_3D[z, :, :]
             if len(img_2d.shape) == 2:
                 img_3c = np.repeat(img_2d[:, :, None], 3, axis=-1)
@@ -247,11 +248,12 @@ def MedSAM_infer_npz_3D(img_npz_file):
                     box_256 = get_bbox256(pre_seg256)
                 else:
                     box_256 = resize_box_to_256(mid_slice_bbox_2d, original_size=(H, W))
-            img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, box_256, [new_H, new_W], [H, W])
+            img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, box_256[None], [new_H, new_W], [H, W])
             segs_3d_temp[z, img_2d_seg>0] = idx
         
         # infer from middle slice to the z_max
         # print(npz_name, 'infer from middle slice to the z_min')
+        zmin = max(0, z_min-1)
         for z in range(z_middle-1, z_min, -1):
             img_2d = img_3D[z, :, :]
             if len(img_2d.shape) == 2:
@@ -281,7 +283,7 @@ def MedSAM_infer_npz_3D(img_npz_file):
                 box_256 = get_bbox256(pre_seg256)
             else:
                 box_256 = resize_box_to_256(mid_slice_bbox_2d, original_size=(H, W))
-            img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, box_256, [new_H, new_W], [H, W])
+            img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, box_256[None], [new_H, new_W], [H, W])
             segs_3d_temp[z, img_2d_seg>0] = idx
         segs[segs_3d_temp>0] = idx
     np.savez_compressed(
@@ -311,7 +313,6 @@ def MedSAM_infer_npz_3D(img_npz_file):
         plt.tight_layout()
         plt.savefig(join(png_save_dir, npz_name.split(".")[0] + '.png'), dpi=300)
         plt.close()
-
 
 if __name__ == '__main__':
     img_npz_files = sorted(glob(join(data_root, '*.npz'), recursive=True))

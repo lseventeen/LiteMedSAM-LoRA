@@ -9,17 +9,22 @@ import cv2
 from visual_sampler.sampler import build_shape_sampler
 from visual_sampler.config import cfg
 from dataset.utils import resize_longest_side,pad_image
-
+# from monai.transforms import Compose, RandomAffine, RandomGamma
 
 
 class NpyBoxDataset(Dataset): 
     def __init__(self, data_root, num_each_epoch = 100000,image_size=256, bbox_shift=5, num_masks = 16, data_aug=True):
         self.data_root = data_root
-        self.data_list = []
+        self.data_dict = {}
         data_mode = os.listdir(data_root)
+        
+
         for i in data_mode:
             # self.data_list.append({i: [f for f in os.listdir(join(data_root,i,"gts")) if isfile(join(data_root,i,"gts", f)) and  f.endswith(".npy")]})
-            self.data_list.append({i: os.listdir(join(data_root,i,"gts"))})
+            # self.data_list.append({i: os.listdir(join(data_root,i,"gts"))})
+            self.data_dict[i]=os.listdir(join(data_root,i,"gts"))
+            print(i,len(os.listdir(join(data_root,i,"gts"))))
+            
         # self.gt_path = join(data_root, 'gts')
         # self.img_path = join(data_root, 'imgs')
         # self.gt_path_files = sorted(glob(join(self.gt_path, '*.npy'), recursive=True))
@@ -38,10 +43,14 @@ class NpyBoxDataset(Dataset):
         return self.num_each_epoch
 
     def __getitem__(self, index):
-
-        data_dict = random.choice(self.data_list)
-        data_mode = list(data_dict.keys())[0]
-        img_name = random.choice(list(data_dict.values())[0])
+        if random.random() < 0.4:
+            data_mode = "CT"
+        elif random.random() < 0.5:
+            data_mode = "MR"
+        else:
+            data_mode  = random.choice(list(self.data_dict.keys()))
+        # print(data_mode)
+        img_name = random.choice(self.data_dict.get(data_mode))
         
         # assert img_name == basename(self.gt_path_files[index]), 'img gt name error' + self.gt_path_files[index] + self.npy_files[index]
 
@@ -74,6 +83,7 @@ class NpyBoxDataset(Dataset):
                 img_padded = np.ascontiguousarray(np.flip(img_padded, axis=-2))
                 gt = np.ascontiguousarray(np.flip(gt, axis=-2))
                 # print('DA with flip upside down')
+            
         gts = []
         boxes = []
         for i in range(self.num_masks):
@@ -116,16 +126,21 @@ class NpyBoxDataset(Dataset):
     
 
 class NpyScribbleDataset(NpyBoxDataset): 
-    def __init__(self, data_root, num_each_epoch = 100000, image_size=256, bbox_shift=5, num_masks = 64, data_aug=True):
-        super().__init__(data_root, num_each_epoch,image_size, bbox_shift, num_masks, data_aug)
-      
+    def __init__(self, data_root, num_each_epoch = 100000, image_size=256, num_masks = 16, max_num_point = 1000000,data_aug=True):
+        super().__init__(data_root, num_each_epoch,image_size, num_masks = num_masks, data_aug = data_aug)
+        self.max_num = max_num_point
         self.shape_sampler = build_shape_sampler(cfg)
     
 
     def __getitem__(self, index):
-        data_dict = random.choice(self.data_list)
-        data_mode = list(data_dict.keys())[0]
-        img_name = random.choice(list(data_dict.values())[0])
+        if random.random() < 0.4:
+            data_mode = "CT"
+        elif random.random() < 0.5:
+            data_mode = "MR"
+        else:
+            data_mode  = random.choice(list(self.data_dict.keys()))
+        # print(data_mode)
+        img_name = random.choice(self.data_dict.get(data_mode))
         
         img_3c = np.load(join(self.data_root,data_mode,"imgs", img_name), 'r', allow_pickle=True) # (H, W, 3)
         img_resize = resize_longest_side(img_3c,self.target_length)
@@ -145,13 +160,19 @@ class NpyScribbleDataset(NpyBoxDataset):
         label_ids = np.unique(gt)[1:]
 
         gts = []
-        mask_inputs = []
-        for i in range(self.num_masks):
-
+        # mask_inputs = []
+        point_coords = []
+        point_coords_num = []
+        # point_labels = []
+        
+        for _ in range(self.num_masks):
+        # for i in label_ids:
             try:
                 gt2D = np.uint8(gt == random.choice(label_ids.tolist())) # only one label, (256, 256)
+
+                # gt2D = np.uint8(gt == i) # only one label, (256, 256)
             except:
-                print(img_name, 'label_ids.tolist()', label_ids.tolist())
+                print(img_name, 'label_ids.tolist()', label_ids)
                 gt2D = np.uint8(gt == np.max(gt)) # only one label, (256, 256)
             # add data augmentation: random fliplr and random flipud
             if self.data_aug:
@@ -165,15 +186,31 @@ class NpyScribbleDataset(NpyBoxDataset):
                     # print('DA with flip upside down')
             gt2D = np.uint8(gt2D > 0)
             scribbles = (self.shape_sampler(gt2D) * 1)
+            point_coords_each_label = np.argwhere(scribbles[0] == 1)
+            point_coords_num.append(point_coords_each_label.shape[1])
 
+            point_coords_each_label_num = self.max_num - point_coords_each_label.shape[1]
+            pad_width = [(0, 0), (0, point_coords_each_label_num)]
+            
+            # 执行填充
+            point_coords_each_label = np.pad(point_coords_each_label, pad_width, mode='constant', constant_values=0)
+            
             gts.append(gt2D)
-            mask_inputs.append(scribbles)
+            point_coords.append(point_coords_each_label)
+            
+            # point_labels.append(i)
+      
+
         gts = np.stack(gts,axis=0)
-        mask_inputs = np.stack(mask_inputs,axis=0)
+        point_coords = np.stack(point_coords,axis=0).transpose(0,2,1)
+        point_coords_num = np.stack(point_coords_num,axis=0)
+        # point_labels = np.stack(point_labels,axis=0)
         return {
             "image": torch.tensor(img_padded).float(),
             "gt2D": torch.tensor(gts).float(),
-            "mask_inputs": torch.tensor(mask_inputs).float(),
+            "point_coords": torch.tensor(point_coords).float(),
+            # "point_label": torch.tensor(point_labels).float(),
+            "point_coords_num": torch.tensor(point_coords_num),
             "image_name": img_name,
             "new_size": torch.tensor(np.array([img_resize.shape[0], img_resize.shape[1]])).long(),
             "original_size": torch.tensor(np.array([img_3c.shape[0], img_3c.shape[1]])).long()

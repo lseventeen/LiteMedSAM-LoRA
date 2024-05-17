@@ -152,7 +152,7 @@ class SAMIL:
         self.checkpoint = args.resume
         self.train_mode = args.train_mode 
         self.num_masks = args.num_masks 
-        self.amp = "fp32"
+        self.amp = "fp16"
         self.grad_clip = 2
         self.dataset = NpyBoxDataset if self.train_mode == "boxes" else NpyScribbleDataset
         # self.model = build_model(self.args)
@@ -332,7 +332,7 @@ class SAMIL:
                     
                 
                     loss_mask_i, loss_dice_i = loss_masks(output_i, gt, len(output_i), mode="none")
-                    loss_i = loss_mask_i * 20 + loss_dice_i
+                    loss_i = loss_mask_i + loss_dice_i
                     loss_list.append(loss_i)
                 loss = torch.stack(loss_list, -1)
 

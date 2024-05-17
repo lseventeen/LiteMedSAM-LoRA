@@ -99,31 +99,32 @@ medsam_lite_model.eval()
 
 
 @torch.no_grad()
-def medsam_inference(medsam_model, img_embed, scribble, new_size, original_size):
-    scribble_torch = torch.as_tensor(scribble, dtype=torch.float, device=img_embed.device)
-
+def medsam_inference(medsam_model, img_embed, point_coords, new_size, original_size):
+    point_coords = torch.as_tensor(point_coords, dtype=torch.float, device=img_embed.device)
+    point_labels = torch.ones((point_coords.shape[0],point_coords.shape[1]))
+    points = (point_coords, point_labels)
     sparse_embeddings, dense_embeddings = medsam_model.prompt_encoder(
-        points = None,
-        boxes = None,
-        masks = scribble_torch,
+        points=points,
+        boxes=None,
+        masks=None,
     )
-    low_res_logits, iou = medsam_model.mask_decoder(
-        image_embeddings=img_embed, # (B, 256, 64, 64)
-        image_pe=medsam_model.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
-        sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
-        dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
-        multimask_output=False
+    low_res_masks, iou_predictions = medsam_model.mask_decoder(
+        image_embeddings=img_embed,
+        image_pe=medsam_model.prompt_encoder.get_dense_pe(),
+        sparse_prompt_embeddings=sparse_embeddings,
+        dense_prompt_embeddings=dense_embeddings,
+        multimask_output=False,
     )
 
     # low_res_pred = medsam_model.postprocess_masks(low_res_logits, new_size, original_size)
     # low_res_pred = torch.sigmoid(low_res_pred)
     # low_res_pred = low_res_pred.squeeze().cpu().numpy()
     # medsam_seg = (low_res_pred > 0.5).astype(np.uint8)
-    low_res_pred = medsam_model.postprocess_masks(low_res_logits, new_size, original_size)
+    low_res_pred = medsam_model.postprocess_masks(low_res_masks, new_size, original_size)
     # low_res_pred = torch.sigmoid(low_res_pred)  
     medsam_seg = low_res_pred.squeeze().cpu()
 
-    return medsam_seg, iou
+    return medsam_seg, iou_predictions
 
 
 
@@ -150,36 +151,35 @@ def MedSAM_infer_npz(gt_path_file):
 
 
     label_ids = np.unique(scribble[(scribble != 0) & (scribble != 1000)])
-    scribbles_list = []
-    scribbles_label = []
+    scribbles_output = []
     for label_id in label_ids:
         
-        scribble_input = np.uint8(scribble == label_id)
-        scribble_input = pad_image(resize_longest_side(scribble_input[...,np.newaxis],256)[:, :, None], 256)
-        scribble_input = torch.from_numpy(scribble_input).permute(2,0,1)
-        scribble_input = (scribble_input > 0) * 1
-
-        scribbles_list.append(scribble_input)
-
-    if len(scribbles_list) > 1:
-        scribbles_list = torch.stack(scribbles_list)
+        point_coords_each_label = np.argwhere(scribble == label_id)[None]
+        
+        medsam_mask, iou_pred = medsam_inference(medsam_lite_model, image_embedding, point_coords_each_label, (newh, neww), (H, W))
+        scribbles_output.append(medsam_mask)
+    if len(scribbles_output) > 1:
+        scribbles_output = torch.stack(scribbles_output)
     else:
-        scribbles_list = scribbles_list[0]
-    scribbles_label = torch.tensor(label_ids)
+        scribbles_output = scribbles_output[0]
+    
 
-
-
-    medsam_mask, iou_pred = medsam_inference(medsam_lite_model, image_embedding, scribbles_list, (newh, neww), (H, W))
-    if len(medsam_mask.shape) == 2:
+    if len(scribbles_output.shape) == 2:
         # medsam_mask = torch.sigmoid(medsam_mask ) 
-        medsam_mask = (medsam_mask > 0).int()
+        scribbles_output = (scribbles_output > 0).int()
     else: 
         new_die = torch.zeros([1,H, W])
-        medsam_mask = torch.cat([new_die,medsam_mask])
+        scribbles_output = torch.cat([new_die,scribbles_output])
         # medsam_mask += 1
-        medsam_mask = torch.argmax(medsam_mask, axis=0)
-        
-    segs = medsam_mask.numpy()
+        scribbles_output = torch.argmax(scribbles_output, axis=0)
+    
+        # if np.max(label_ids) > scribbles_output.max():
+        #     print("label ID is not continue")
+        #     for idx, label_id in enumerate(label_ids):
+        #         scribbles_output[scribbles_output == idx+1] = label_id
+
+
+    segs = scribbles_output.numpy()
     np.savez_compressed(
         join(pred_save_dir, npz_name),
         segs=segs
@@ -208,13 +208,19 @@ def MedSAM_infer_npz(gt_path_file):
         plt.close()
 
 if __name__ == '__main__':
-    num_workers = num_workers
+    num_workers = 1
 
-    mp.set_start_method('spawn')
-    with mp.Pool(processes=num_workers) as pool:
-        with tqdm(total=len(gt_path_files)) as pbar:
-            for i, _ in tqdm(enumerate(pool.imap_unordered(MedSAM_infer_npz, gt_path_files))):
-                pbar.update()
+    # mp.set_start_method('spawn')
+    # with mp.Pool(processes=num_workers) as pool:
+    #     with tqdm(total=len(gt_path_files)) as pbar:
+    #         for i, _ in tqdm(enumerate(pool.imap_unordered(MedSAM_infer_npz, gt_path_files))):
+    #             pbar.update()
 
+    # with tqdm(total=len(gt_path_files)) as pbar:
+    #     for i, _ in tqdm(enumerate(pool.imap_unordered(MedSAM_infer_npz, gt_path_files))):
+    #         pbar.update()
+    for img_npz_file in tqdm(gt_path_files):
+        MedSAM_infer_npz(img_npz_file)
 
+    
 # %%

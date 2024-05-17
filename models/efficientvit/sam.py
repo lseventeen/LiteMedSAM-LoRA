@@ -227,12 +227,12 @@ class EfficientViTSam(nn.Module):
         input_size: tuple[int, ...],
         original_size: tuple[int, ...],
     ) -> torch.Tensor:
-        masks = F.interpolate(
-            masks,
-            (self.image_size[0], self.image_size[0]),
-            mode="bilinear",
-            align_corners=False,
-        )
+        # masks = F.interpolate(
+        #     masks,
+        #     (self.image_size[0], self.image_size[0]),
+        #     mode="bilinear",
+        #     align_corners=False,
+        # )
         masks = masks[..., : input_size[0], : input_size[1]]
         masks = F.interpolate(masks, original_size, mode="bilinear", align_corners=False)
         return masks

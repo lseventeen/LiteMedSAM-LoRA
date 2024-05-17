@@ -76,9 +76,6 @@ class MedSAM_Lite(nn.Module):
                 shape BxCxHxW, where H=W=256. Can be passed as mask input
                 to subsequent iterations of prediction.
         """
-        # input_images = torch.stack(
-        #     [self.preprocess(x["image"]) for x in batched_input], dim=0
-        # )
         input_images = torch.stack([x["image"] for x in batched_input], dim=0)
         image_embeddings = self.image_encoder(input_images)
 
@@ -126,8 +123,81 @@ class MedSAM_Lite(nn.Module):
         return masks
 
 
+class MedSAM_Lite_scribble(MedSAM_Lite):
+    # def __init__(self, 
+    #             image_encoder, 
+    #             mask_decoder,
+    #             prompt_encoder
+    #             ):
+    #     super().__init__(image_encoder,mask_decoder,prompt_encoder)
+        # self.image_encoder = image_encoder
+        # self.mask_decoder = mask_decoder
+        # self.prompt_encoder = prompt_encoder
+        
+    # def forward(self, image, boxes=None,masks=None):
+    #     image_embedding = self.image_encoder(image) # (B, 256, 64, 64)
 
-def build_model(args):
+    #     sparse_embeddings, dense_embeddings = self.prompt_encoder(
+    #         points=None,
+    #         boxes=boxes,
+    #         masks=masks,
+    #     )
+    #     low_res_masks, iou_predictions = self.mask_decoder(
+    #         image_embeddings=image_embedding, # (B, 256, 64, 64)
+    #         image_pe=self.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
+    #         sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
+    #         dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
+    #         multimask_output=False,
+    #       ) # (B, 1, 256, 256)
+
+    #     return low_res_masks, iou_predictions
+    
+    # def multi_point_label_process(self,):
+        
+        
+
+
+    def forward(self, batched_input: List[Dict[str, Any]],
+        multimask_output: bool,):
+  
+        input_images = torch.stack([x["image"] for x in batched_input], dim=0)
+        image_embeddings = self.image_encoder(input_images)
+
+        outputs = []
+        iou_outputs = []
+        for image_record, curr_embedding in zip(batched_input, image_embeddings):
+            # if "point_coords" in image_record:
+            # points = (image_record["point_coords"], image_record["point_coords_num"])
+          
+            for idx, point_coords in enumerate(image_record["point_coords"]):
+                points_num = image_record["point_coords_num"][idx].item()
+                point_coords = point_coords[None,:points_num,:]
+                point_labels = torch.ones((1,points_num))
+                points = (point_coords, point_labels)
+                sparse_embeddings, dense_embeddings = self.prompt_encoder(
+                    points=points,
+                    boxes=image_record.get("boxes", None),
+                    masks=image_record.get("mask_inputs", None),
+                )
+                low_res_masks, iou_predictions = self.mask_decoder(
+                    image_embeddings=curr_embedding.unsqueeze(0),
+                    image_pe=self.prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embeddings,
+                    dense_prompt_embeddings=dense_embeddings,
+                    multimask_output=multimask_output,
+                )
+                outputs.append(low_res_masks)
+                iou_outputs.append(iou_predictions)
+
+        outputs = torch.stack([out for out in outputs], dim=0)
+        iou_outputs = torch.stack(iou_outputs, dim=0)
+        return outputs, iou_outputs
+
+    
+
+
+
+def build_model(args,is_boxes=True):
     image_encoder = TinyViT(
     args = args,
     img_size=256,
@@ -169,10 +239,15 @@ def build_model(args):
             iou_head_depth=3,
             iou_head_hidden_dim=256,
     )
-
-    model = MedSAM_Lite(
+    if is_boxes:
+        return MedSAM_Lite(
         image_encoder = image_encoder,
         mask_decoder = mask_decoder,
         prompt_encoder = prompt_encoder
     )
-    return model
+    else:
+        return MedSAM_Lite_scribble(
+        image_encoder = image_encoder,
+        mask_decoder = mask_decoder,
+        prompt_encoder = prompt_encoder)
+    

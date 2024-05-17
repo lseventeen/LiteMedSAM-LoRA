@@ -18,11 +18,14 @@ import pandas as pd
 from datetime import datetime
 from build_model import build_model
 from models.efficientvit.sam import efficientvit_sam_l0,efficientvit_sam_l1,efficientvit_sam_l2
+import concurrent.futures
 #%% set seeds
 torch.set_float32_matmul_precision('high')
 torch.manual_seed(2024)
 torch.cuda.manual_seed(2024)
 np.random.seed(2024)
+
+
 
 parser = argparse.ArgumentParser()
 
@@ -104,35 +107,6 @@ lite_medsam_checkpoint = torch.load(lite_medsam_checkpoint_path, map_location='c
 medsam_lite_model.load_state_dict(lite_medsam_checkpoint["model"])
 medsam_lite_model.to(device)
 medsam_lite_model.eval()
-
-
-
-def resize_boxes(boxes, scale_x, scale_y):
-    # 转换为NumPy数组便于操作
-    boxes = np.array(boxes)
-    
-    # 计算中心点坐标
-    centers = (boxes[:, :3] + boxes[:, 3:]) / 2
-    
-    # 计算当前宽度和高度
-    widths = boxes[:, 3] - boxes[:, 0]
-    heights = boxes[:, 4] - boxes[:, 1]
-    depths = boxes[:, 5] - boxes[:, 2]  # 深度保持不变
-    
-    # 计算新的宽度和高度
-    new_widths = widths * scale_x
-    new_heights = heights * scale_y
-    
-    # 计算新的左上角和右下角坐标
-    new_boxes = np.zeros_like(boxes)
-    new_boxes[:, 0] = centers[:, 0] - new_widths / 2
-    new_boxes[:, 1] = centers[:, 1] - new_heights / 2
-    new_boxes[:, 2] = boxes[:, 2]  # z_min 不变
-    new_boxes[:, 3] = centers[:, 0] + new_widths / 2
-    new_boxes[:, 4] = centers[:, 1] + new_heights / 2
-    new_boxes[:, 5] = boxes[:, 5]  # z_max 不变
-    
-    return new_boxes.tolist()
 
 
 @torch.no_grad()
@@ -240,9 +214,177 @@ def MedSAM_infer_npz_2D(img_npz_file, new_size =512):
 
 
 
+def MedSAM_infer_npz_3D(img_npz_file,new_size =512):
+    npz_name = basename(img_npz_file)
+    npz_data = np.load(img_npz_file, 'r', allow_pickle=True)
+    img_3D = npz_data['imgs'] # (D, H, W)
+    spacing = npz_data['spacing'] # not used in this demo because it treats each slice independently
+    segs = np.zeros_like(img_3D, dtype=np.uint8) 
+    boxes_3D = npz_data['boxes'] # [[x_min, y_min, z_min, x_max, y_max, z_max]]
+
+    for idx, box3D in enumerate(boxes_3D, start=1):
+        segs_3d_temp = np.zeros_like(img_3D, dtype=np.uint8) 
+        x_min, y_min, z_min, x_max, y_max, z_max = box3D
+        assert z_min < z_max, f"z_min should be smaller than z_max, but got {z_min=} and {z_max=}"
+        mid_slice_bbox_2d = np.array([x_min, y_min, x_max, y_max])
+        z_middle = int((z_max - z_min)/2 + z_min)
+
+        # infer from middle slice to the z_max
+        # print(npz_name, 'infer from middle slice to the z_max')
+        for z in range(z_middle, z_max):
+            img_2d = img_3D[z, :, :]
+            if len(img_2d.shape) == 2:
+                img_3c = np.repeat(img_2d[:, :, None], 3, axis=-1)
+            else:
+                img_3c = img_2d
+            H, W, _ = img_3c.shape
+
+            img_256 = resize_longest_side(img_3c, new_size)
+            new_H, new_W = img_256.shape[:2]
+
+            img_256 = (img_256 - img_256.min()) / np.clip(
+                img_256.max() - img_256.min(), a_min=1e-8, a_max=None
+            )  # normalize to [0, 1], (H, W, 3)
+            ## Pad image to 256x256
+            img_256 = pad_image(img_256,new_size)
+            
+            # convert the shape to (3, H, W)
+            img_256_tensor = torch.tensor(img_256).float().permute(2, 0, 1).unsqueeze(0).to(device)
+            # get the image embedding
+            with torch.no_grad():
+                image_embedding = medsam_lite_model.image_encoder(img_256_tensor) # (1, 256, 64, 64)
+            if z == z_middle:
+                box_256 = resize_box_to_256(mid_slice_bbox_2d, original_size=(H, W),new_size = new_size)
+            else:
+                pre_seg = segs_3d_temp[z-1, :, :]
+                pre_seg256 = resize_longest_side(pre_seg)
+                if np.max(pre_seg256) > 0:
+                    pre_seg256 = pad_image(pre_seg256)
+                    box_256 = get_bbox256(pre_seg256)
+                else:
+                    box_256 = resize_box_to_256(mid_slice_bbox_2d, original_size=(H, W))
+            img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, box_256[None], [new_H, new_W], [H, W])
+            segs_3d_temp[z, img_2d_seg>0] = idx
+        
+        # infer from middle slice to the z_max
+        # print(npz_name, 'infer from middle slice to the z_min')
+        for z in range(z_middle-1, z_min, -1):
+            img_2d = img_3D[z, :, :]
+            if len(img_2d.shape) == 2:
+                img_3c = np.repeat(img_2d[:, :, None], 3, axis=-1)
+            else:
+                img_3c = img_2d
+            H, W, _ = img_3c.shape
+
+            img_256 = resize_longest_side(img_3c)
+            new_H, new_W = img_256.shape[:2]
+
+            img_256 = (img_256 - img_256.min()) / np.clip(
+                img_256.max() - img_256.min(), a_min=1e-8, a_max=None
+            )  # normalize to [0, 1], (H, W, 3)
+            ## Pad image to 256x256
+            img_256 = pad_image(img_256)
+
+            img_256_tensor = torch.tensor(img_256).float().permute(2, 0, 1).unsqueeze(0).to(device)
+            # get the image embedding
+            with torch.no_grad():
+                image_embedding = medsam_lite_model.image_encoder(img_256_tensor) # (1, 256, 64, 64)
+
+            pre_seg = segs_3d_temp[z+1, :, :]
+            pre_seg256 = resize_longest_side(pre_seg)
+            if np.max(pre_seg256) > 0:
+                pre_seg256 = pad_image(pre_seg256)
+                box_256 = get_bbox256(pre_seg256)
+            else:
+                box_256 = resize_box_to_256(mid_slice_bbox_2d, original_size=(H, W))
+            img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, box_256[None], [new_H, new_W], [H, W])
+            segs_3d_temp[z, img_2d_seg>0] = idx
+        segs[segs_3d_temp>0] = idx
+    np.savez_compressed(
+        join(pred_save_dir, npz_name),
+        segs=segs,
+    )            
+
+    # visualize image, mask and bounding box
+    if save_overlay:
+        idx = int(segs.shape[0] / 2)
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        ax[0].imshow(img_3D[idx], cmap='gray')
+        ax[1].imshow(img_3D[idx], cmap='gray')
+        ax[0].set_title("Image")
+        ax[1].set_title("LiteMedSAM Segmentation")
+        ax[0].axis('off')
+        ax[1].axis('off')
+
+        for i, box3D in enumerate(boxes_3D, start=1):
+            if np.sum(segs[idx]==i) > 0:
+                color = np.random.rand(3)
+                x_min, y_min, z_min, x_max, y_max, z_max = box3D
+                box_viz = np.array([x_min, y_min, x_max, y_max])
+                show_box(box_viz, ax[1], edgecolor=color)
+                show_mask(segs[idx]==i, ax[1], mask_color=color)
+
+        plt.tight_layout()
+        plt.savefig(join(png_save_dir, npz_name.split(".")[0] + '.png'), dpi=300)
+        plt.close()
 
 
 
+def process_z(img_3D, z, boxes_3D, device, medsam_lite_model):
+    boxes_2D = []
+    boxes_2D_index = []
+    for idx, box3D in enumerate(boxes_3D, start=1):
+        if z >= box3D[2] and z <= box3D[5]:
+            x_min, y_min, z_min, x_max, y_max, z_max = box3D
+            boxes_2D.append(np.array([x_min, y_min, x_max, y_max]))
+            boxes_2D_index.append(idx)
+
+    if len(boxes_2D) > 1:
+        boxes_2D = np.stack(boxes_2D)
+    elif len(boxes_2D) == 1:
+        boxes_2D = boxes_2D[0]
+    else:
+        return None
+
+    boxes_2D_index = torch.tensor(boxes_2D_index)
+
+    img_2d = img_3D[z, :, :]
+    if len(img_2d.shape) == 2:
+        img_3c = np.repeat(img_2d[:, :, None], 3, axis=-1)
+    else:
+        img_3c = img_2d
+    H, W, _ = img_3c.shape
+
+    img_256 = resize_longest_side(img_3c, new_size)
+    new_H, new_W = img_256.shape[:2]
+
+    img_256 = (img_256 - img_256.min()) / np.clip(
+        img_256.max() - img_256.min(), a_min=1e-8, a_max=None
+    )  # normalize to [0, 1], (H, W, 3)
+    ## Pad image to 256x256
+    img_256 = pad_image(img_256)
+
+    # convert the shape to (3, H, W)
+    img_256_tensor = torch.tensor(img_256).float().permute(2, 0, 1).unsqueeze(0).to(device)
+    # get the image embedding
+    with torch.no_grad():
+        image_embedding = medsam_lite_model.image_encoder(img_256_tensor) # (1, 256, 64, 64)
+    if len(boxes_2D.shape) == 1:
+         boxes_2D = boxes_2D[None]
+    boxes_2D = resize_box_to_256(boxes_2D, original_size=(H, W),new_size = 256)
+    img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, boxes_2D, [new_H, new_W], [H, W])
+    if len(img_2d_seg.shape) == 2:
+        # medsam_mask = torch.sigmoid(medsam_mask ) 
+        img_2d_seg = (img_2d_seg > 0).int()*boxes_2D_index
+        
+    else: 
+        new_die = torch.zeros([1,H, W])
+        img_2d_seg = torch.cat([new_die,img_2d_seg])
+        # medsam_mask += 1
+        img_2d_seg = torch.argmax(img_2d_seg, axis=0)
+        for idx,label in enumerate(boxes_2D_index,start=1):
+            img_2d_seg[img_2d_seg==idx] = label
+    return z, img_2d_seg
 
 def MedSAM_infer_npz_3DV2(img_npz_file, new_size=256):
     npz_name = basename(img_npz_file)
@@ -254,65 +396,23 @@ def MedSAM_infer_npz_3DV2(img_npz_file, new_size=256):
     # box_256
     Z_3D_min = min(boxes_3D[:,2])
     z_3D_max = max(boxes_3D[:,5])
-    for z in range(Z_3D_min, z_3D_max+1):
-        boxes_2D = []
-        boxes_2D_index = []
-        for idx, box3D in enumerate(boxes_3D, start=1):
-            if z >= box3D[2] and z <= box3D[5]:
-                x_min, y_min, z_min, x_max, y_max, z_max = box3D
-                boxes_2D.append(np.array([x_min, y_min, x_max, y_max]))
-                boxes_2D_index.append(idx)
-        
-        if len(boxes_2D) > 1:
-            boxes_2D = np.stack(boxes_2D)
-        elif len(boxes_2D) == 1:
-            boxes_2D = boxes_2D[0]
-        else:
-            continue
-        boxes_2D_index = torch.tensor(boxes_2D_index)
 
-        img_2d = img_3D[z, :, :]
-        if len(img_2d.shape) == 2:
-            img_3c = np.repeat(img_2d[:, :, None], 3, axis=-1)
-        else:
-            img_3c = img_2d
-        H, W, _ = img_3c.shape
+    # Define the range for z values
+    z_range = range(Z_3D_min, z_3D_max+1)
 
-        img_256 = resize_longest_side(img_3c, new_size)
-        new_H, new_W = img_256.shape[:2]
+    # Create a ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Submit tasks for each z value and collect the results
+        results = [executor.submit(process_z, img_3D, z, boxes_3D, device, medsam_lite_model) for z in z_range]
 
-        img_256 = (img_256 - img_256.min()) / np.clip(
-            img_256.max() - img_256.min(), a_min=1e-8, a_max=None
-        )  # normalize to [0, 1], (H, W, 3)
-        ## Pad image to 256x256
-        img_256 = pad_image(img_256)
-        
-        # convert the shape to (3, H, W)
-        img_256_tensor = torch.tensor(img_256).float().permute(2, 0, 1).unsqueeze(0).to(device)
-        # get the image embedding
-        with torch.no_grad():
-            image_embedding = medsam_lite_model.image_encoder(img_256_tensor) # (1, 256, 64, 64)
-        if len(boxes_2D.shape) == 1:
-             boxes_2D = boxes_2D[None]
-        boxes_2D = resize_box_to_256(boxes_2D, original_size=(H, W),new_size = 256)
-        img_2d_seg, iou_pred = medsam_inference(medsam_lite_model, image_embedding, boxes_2D, [new_H, new_W], [H, W])
-        if len(img_2d_seg.shape) == 2:
-            # medsam_mask = torch.sigmoid(medsam_mask ) 
-            img_2d_seg = (img_2d_seg > 0).int()*boxes_2D_index
-            
-        else: 
-            new_die = torch.zeros([1,H, W])
-            img_2d_seg = torch.cat([new_die,img_2d_seg])
-            # medsam_mask += 1
-            img_2d_seg = torch.argmax(img_2d_seg, axis=0)
-            for idx,label in enumerate(boxes_2D_index,start=1):
-                img_2d_seg[img_2d_seg==idx] = label
-        segs[z] = img_2d_seg
-        
-    np.savez_compressed(
-        join(pred_save_dir, npz_name),
-        segs=segs,
-    )            
+        # Process the results
+        for future in concurrent.futures.as_completed(results):
+            result = future.result()
+            if result is not None:
+                z, img_2d_seg = result
+                segs[z] = img_2d_seg
+
+  
 
     # visualize image, mask and bounding box
     if save_overlay:
@@ -347,7 +447,7 @@ if __name__ == '__main__':
     for img_npz_file in tqdm(img_npz_files):
         start_time = time()
         if basename(img_npz_file).startswith('3D'):
-            MedSAM_infer_npz_3DV2(img_npz_file,new_size)
+            MedSAM_infer_npz_3D(img_npz_file,new_size)
         else:
             MedSAM_infer_npz_2D(img_npz_file,new_size)
         end_time = time()

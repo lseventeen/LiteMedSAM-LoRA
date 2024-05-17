@@ -29,11 +29,7 @@ def Config():
         help="Path to the npy data root."
     )
     parser.add_argument(
-        "-pretrained_checkpoint", type=str, default="pretrain_weight/boxes/lite_medsam_boxes.pth",
-        help="Path to the pretrained Lite-MedSAM checkpoint."
-    )
-    parser.add_argument(
-        "-train_mode", type=str, default="boxes",
+        "-pretrained_checkpoint", type=str, default="pretrain_weight/scribble/lite_medsam_scribble.pth",
         help="Path to the pretrained Lite-MedSAM checkpoint."
     )
     parser.add_argument(
@@ -41,7 +37,7 @@ def Config():
         help="Path to the checkpoint to continue training."
     )
     parser.add_argument(
-        "-num_masks", type=int, default=16,
+        "-num_masks", type=int, default=4,
         help="set the number of mask for each image"
     )
     parser.add_argument("-tag", help='tag of experiment',default=None)
@@ -77,10 +73,7 @@ def Config():
         "-device", type=str, default="cuda:0",
         help="Device to train on."
     )
-    parser.add_argument(
-        "-bbox_shift", type=int, default=10,
-        help="Perturbation to bounding box coordinates during training."
-    )
+
     parser.add_argument(
         "-lr", type=float, default=0.00005,
         help="Learning rate."
@@ -102,8 +95,8 @@ def Config():
         help="Weight of cross entropy loss."
     )
     args = parser.parse_args()
-    tag = f"{args.train_mode}_{args.mod}_{args.tag}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
-    wandb.init(project=f"CVPR24_MedSAM_{args.train_mode}", name=tag,
+    tag = f"scribble_{args.tag}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
+    wandb.init(project=f"CVPR24_MedSAM_scribble", name=tag,
                    config=args, mode=args.wandb_mode)
     return args,tag
 # %%
@@ -141,19 +134,18 @@ class SAMIL:
         
         self.num_workers = args.num_workers
         self.device = args.device
-        self.bbox_shift = args.bbox_shift
+        
         self.lr = args.lr
         self.weight_decay = args.weight_decay
         self.iou_loss_weight = args.iou_loss_weight
         self.seg_loss_weight = args.seg_loss_weight
         self.ce_loss_weight = args.ce_loss_weight
         self.checkpoint = args.resume
-        self.train_mode = args.train_mode 
+        # self.train_mode = args.train_mode 
         self.num_masks = args.num_masks 
         self.amp = "fp16"
         self.grad_clip = 2
-        self.dataset = NpyBoxDataset if self.train_mode == "boxes" else NpyScribbleDataset
-        self.model = build_model(self.args)
+        self.model = build_model(self.args,False)
         self.set_model()
 
         makedirs(self.work_dir, exist_ok=True)
@@ -230,7 +222,7 @@ class SAMIL:
         #     train_dataset = NpyBoxDataset(data_root=self.data_root, data_aug=True)
         # else:
         #     train_dataset = NpyBoxDataset(data_root=self.data_root, data_aug=True)
-        train_dataset = self.dataset(data_root=self.data_root, num_each_epoch=self.num_each_epoch ,num_masks = self.num_masks,data_aug=True)
+        train_dataset = NpyScribbleDataset(data_root=self.data_root, num_each_epoch=self.num_each_epoch ,num_masks = self.num_masks,data_aug=True)
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
 
         if self.checkpoint and isfile(self.checkpoint):
@@ -292,22 +284,22 @@ class SAMIL:
             gt = batch["gt2D"]
             image, gt = image.to(self.device), gt.to(self.device)
             self.optimizer.zero_grad()
-            if self.train_mode == "boxes":
-                boxes = batch["bboxes"]
-                boxes = boxes.to(self.device)
-            else:
-                masks_input = batch['mask_inputs']
-                masks_input = masks_input.to(self.device)
+          
+            point_coords = batch['point_coords']
+            point_coords_num = batch['point_coords_num']
+            # point_labels = batch['point_labels']
+            point_coords = point_coords.to(self.device)
+            # point_labels = point_labels.to(self.device)
+            point_coords_num = point_coords_num.to(self.device)
 
             batched_input = []
             for b_i in range(len(image)):
                 dict_input = dict()
                 dict_input["image"] = image[b_i]
-                if self.train_mode == "boxes":
-                    dict_input["boxes"] = boxes[b_i]
-                else:
-                    dict_input["mask_inputs"] = masks_input[b_i] 
-    
+              
+                dict_input["point_coords"] = point_coords[b_i] 
+                # dict_input["point_labels"] = point_labels[b_i] 
+                dict_input["point_coords_num"] = point_coords_num[b_i] 
                 batched_input.append(dict_input)
                 
             
